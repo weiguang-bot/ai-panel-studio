@@ -5,11 +5,12 @@ AI 圆桌讨论 — 会话管理蓝图
   POST   /api/sessions          — 创建讨论会话
   GET    /api/sessions           — 获取会话列表
   GET    /api/sessions/{id}      — 获取会话详情（含专家列表）
-  GET    /api/sessions/{id}/events  — SSE 事件流（暂未实现）
+  GET    /api/sessions/{id}/events  — SSE 事件流
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, Response
 from app.models import Session, Expert
 from app.services.expert_generator import generate_experts
+from app.services.transcript_stream import event_generator
 
 sessions_bp = Blueprint('sessions', __name__)
 
@@ -117,3 +118,35 @@ def get_session(session_id):
     return jsonify({
         'error': {'code': 'SESSION_NOT_FOUND', 'message': '讨论会话不存在'}
     }), 404
+
+
+@sessions_bp.route('/sessions/<session_id>/events', methods=['GET'])
+def sse_events(session_id):
+    """SSE 事件流：订阅指定会话的实时事件。
+
+    返回 text/event-stream 流式响应。
+    连接建立后立即发送 session.status 事件，之后每 30 秒发送 heartbeat。
+    """
+    # ── 检查会话是否存在 ────────────────────────────────
+    session = Session.get(session_id)
+    if session is None:
+        return jsonify({
+            'error': {'code': 'SESSION_NOT_FOUND', 'message': '讨论会话不存在'}
+        }), 404
+
+    # ── 创建 SSE 事件流生成器 ────────────────────────────
+    generator = event_generator(
+        session_id=session_id,
+        current_status=session.status,
+        previous_status='pending',
+    )
+
+    return Response(
+        generator,
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        },
+    )
