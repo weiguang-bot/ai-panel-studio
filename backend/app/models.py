@@ -274,28 +274,41 @@ class Transcript:
         finally:
             conn.close()
 
-    @staticmethod
-    def list_by_session(session_id, cursor=None, limit=100):
+    @classmethod
+    def list_by_session(cls, session_id, cursor=None, limit=50, after=None):
+        """按 session 查询发言记录，支持游标分页和增量拉取。
+
+        参数：
+            session_id: 会话 UUID
+            cursor: 游标值（sequence），返回该值之后的记录
+            limit: 每页条数（默认 50）
+            after: 增量拉取起点（与 cursor 语义相同）
+
+        返回：
+            (transcripts_list, next_cursor)
+            - transcripts_list: Transcript 对象列表（按 sequence ASC）
+            - next_cursor: 最后一条的 sequence；无更多数据时返回 None
+        """
         conn = _get_db()
         try:
             query = 'SELECT * FROM transcripts WHERE session_id = ?'
             params = [session_id]
-            if cursor is not None:
+
+            # cursor 和 after 语义相同：返回该值之后的记录
+            cursor_val = cursor if cursor is not None else after
+            if cursor_val is not None:
                 query += ' AND sequence > ?'
-                params.append(cursor)
+                params.append(cursor_val)
+
             query += ' ORDER BY sequence ASC LIMIT ?'
             params.append(limit + 1)  # 多取一条判断 has_more
 
             rows = conn.execute(query, params).fetchall()
             has_more = len(rows) > limit
-            items = [Transcript(r).to_dict() for r in rows[:limit]]
-            next_cursor = items[-1]['sequence'] if items else None
+            items = [cls(r) for r in rows[:limit]]
+            next_cursor = items[-1].sequence if items and has_more else None
 
-            return {
-                'transcripts': items,
-                'next_cursor': next_cursor if has_more else None,
-                'has_more': has_more,
-            }
+            return items, next_cursor
         finally:
             conn.close()
 
