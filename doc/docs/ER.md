@@ -1,4 +1,69 @@
-1. ER 图（Markdown 表格 + 关系描述）
+# AI 圆桌讨论 — ER 图
+
+## Mermaid ER 图
+
+```mermaid
+erDiagram
+    Session ||--o{ Expert : "包含"
+    Session ||--o{ Transcript : "产生"
+    Session ||--o{ Consensus : "总结出"
+    Session ||--o{ Divergence : "记录"
+    Expert ||--o{ Transcript : "发言"
+
+    Session {
+        string id PK "UUID"
+        string topic "讨论话题"
+        int expert_count "专家人数(1-10)"
+        string status "状态枚举"
+        string created_at "创建时间"
+        string updated_at "更新时间"
+    }
+
+    Expert {
+        string id PK "UUID"
+        string session_id FK "所属会话"
+        string name "姓名"
+        string title "头衔"
+        string stance "立场描述"
+        string color "代表色HEX"
+        string avatar_emoji "Emoji头像"
+        int sort_order "排序"
+        string created_at "创建时间"
+    }
+
+    Transcript {
+        string id PK "UUID"
+        string session_id FK "所属会话"
+        string speaker_type "host|expert"
+        string speaker_id "专家ID(FK,nullable)"
+        string speaker_name "发言人姓名"
+        string avatar_emoji "发言人头像"
+        string content "发言内容"
+        int sequence "全局序号"
+        string created_at "发言时间"
+    }
+
+    Consensus {
+        string id PK "UUID"
+        string session_id FK "所属会话"
+        string summary "共识描述"
+        int sort_order "排序"
+        string created_at "创建时间"
+    }
+
+    Divergence {
+        string id PK "UUID"
+        string session_id FK "所属会话"
+        string description "分歧描述"
+        string involved_experts "JSON专家ID数组"
+        string side_a_expert "正方专家ID(FK)"
+        string side_b_expert "反方专家ID(FK)"
+        int sort_order "排序"
+        string created_at "创建时间"
+    }
+```
+
+## 实体列表（Markdown 表格 + 关系描述）
 
   实体列表
 
