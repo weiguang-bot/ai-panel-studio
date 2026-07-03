@@ -70,10 +70,10 @@
         <button
           class="btn-start"
           @click="startDiscussion"
-          :disabled="!session.topic.trim()"
+          :disabled="!session.topic.trim() || session.loading"
         >
           <span class="btn-start-icon">🎬</span>
-          <span class="btn-start-text">开始讨论</span>
+          <span class="btn-start-text">{{ session.loading ? '创建中…' : '开始讨论' }}</span>
           <span class="btn-start-glow"></span>
         </button>
 
@@ -113,6 +113,13 @@
         </button>
       </div>
     </header>
+
+    <!-- ─── 错误提示 ─── -->
+    <div v-if="session.error" class="studio-error">
+      <span>⚠️</span>
+      <span>{{ session.error }}</span>
+      <button @click="session.error = ''">&times;</button>
+    </div>
 
     <!-- ─── 主体区域 ─── -->
     <div class="studio-body">
@@ -343,6 +350,30 @@
               </div>
             </div>
           </div>
+
+          <!-- ─── 结论展示 ─── -->
+          <div v-if="session.conclusion" class="stat-card">
+            <div class="stat-label">讨论结论</div>
+            <div class="conclusion-section">
+              <div v-for="c in session.conclusion?.consensus || []" :key="c.id" class="conclusion-item">
+                <span class="conclusion-icon">📌</span>
+                <span class="conclusion-text">{{ c.summary }}</span>
+                <span class="conclusion-tag" :class="'tag-' + c.degree">{{ c.degree }}</span>
+              </div>
+              <div v-if="session.conclusion?.divergences?.length">
+                <div v-for="d in session.conclusion?.divergences || []" :key="d.id" class="conclusion-item">
+                  <span class="conclusion-icon">⚡</span>
+                  <span class="conclusion-text">{{ d.description }}</span>
+                  <span class="conclusion-tag" :class="'tag-' + d.severity">{{ d.severity }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ─── 结论生成按钮 ─── -->
+          <div v-if="session.status === 'concluded' && !session.conclusion" class="stat-card" style="text-align:center;padding:0.6rem">
+            <button @click="generateConclusion" class="btn-conclusion">🏁 生成讨论结论</button>
+          </div>
         </div>
       </aside>
     </div>
@@ -379,98 +410,21 @@
 /**
  * AI 圆桌讨论 — 主页面组件
  *
- * 数据模型与 API 契约保持一致 (参考 docs/api.yaml)，
- * 当前阶段使用前端 Mock 数据模拟全部交互。
+ * 通过真实 API 与 Flask 后端交互：
+ *   POST /api/sessions          — 创建讨论会话
+ *   EventSource /api/sessions/{id}/events — SSE 实时事件流
+ *   GET  /api/sessions/{id}/transcript    — 获取历史发言
+ *   POST /api/sessions/{id}/conclusion    — 生成共识结论
  */
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onUnmounted } from 'vue'
 
-// ─── 模拟专家数据集 ──────────────────────────────────────
-const EXPERT_POOL = [
-  { id: 'e001', name: '张思远', title: 'AI 伦理研究员 · 清华大学', stance: '持审慎乐观态度，认为 AI 会重塑而非取代', color: '#6366f1', avatar_emoji: '🧑‍🔬', sort_order: 1 },
-  { id: 'e002', name: '李敏', title: '算法工程师 · 字节跳动', stance: 'AI 将大规模创造新岗位', color: '#10b981', avatar_emoji: '👩‍💻', sort_order: 2 },
-  { id: 'e003', name: '王建国', title: '劳动经济学教授 · 北京大学', stance: '结构性失业风险真实存在', color: '#f59e0b', avatar_emoji: '👨‍🏫', sort_order: 3 },
-  { id: 'e004', name: '陈思睿', title: 'AI 政策研究顾问', stance: '需要全球协同治理框架', color: '#ef4444', avatar_emoji: '👩‍🎓', sort_order: 4 },
-  { id: 'e005', name: '赵明宇', title: '机器人学专家 · 中科院', stance: '人机协作是未来主旋律', color: '#8b5cf6', avatar_emoji: '👨‍🚀', sort_order: 5 },
-  { id: 'e006', name: '林小婉', title: '未来学家 · 腾讯研究院', stance: 'AI 将催生全新文明形态', color: '#ec4899', avatar_emoji: '🧙‍♀️', sort_order: 6 },
-  { id: 'e007', name: '周浩然', title: '社会学家 · 复旦大学', stance: '技术中性，关键在于制度设计', color: '#14b8a6', avatar_emoji: '👨‍🎓', sort_order: 7 },
-  { id: 'e008', name: '吴晓峰', title: 'AI 安全研究员 · 微软亚洲研究院', stance: '对齐问题比替代问题更紧迫', color: '#f97316', avatar_emoji: '🧑‍💻', sort_order: 8 },
-  { id: 'e009', name: '孙雅文', title: '教育科技创业者', stance: '教育体系必须率先变革', color: '#06b6d4', avatar_emoji: '👩‍🏫', sort_order: 9 },
-  { id: 'e010', name: '黄磊', title: '科技记者 · 36氪', stance: '公众认知与技术发展存在鸿沟', color: '#a855f7', avatar_emoji: '📝', sort_order: 10 },
-]
+// ══════════════════════════════════════════════════════════════════════════
+// 常量
+// ══════════════════════════════════════════════════════════════════════════
 
-// ─── 模拟发言池 ──────────────────────────────────────────
-const MOCK_SPEECHES = {
-  host: [
-    '各位专家好，欢迎来到今天的 AI 圆桌讨论！我们今天聚焦的话题是：{topic}。请大家畅所欲言。',
-    '非常精彩的观点！那么关于这个话题，其他专家有什么不同的看法？',
-    '感谢各位的深入分享。我想把话题引向另一个角度——从社会层面来看，我们该如何为 AI 时代做准备？',
-    '好的，让我们进入下一个议题。关于教育体系应该如何应对 AI 时代的挑战，各位有何高见？',
-    '非常有意思的讨论！我来总结一下刚才几位专家的核心观点……',
-    '时间关系，我们进行最后一个环节。请每位专家用一句话表达您的核心立场。',
-  ],
-  e001: [
-    '我认为 AI 会重塑岗位结构，但不会完全取代人类。关键在于我们如何提前布局教育和培训体系。',
-    '历史表明，每一次技术革命虽然会淘汰部分岗位，但最终都会创造出更多的就业机会。蒸汽机、电力、互联网都是先例。',
-    '我们需要在教育体系中全面引入 AI 素养课程，让下一代具备与 AI 协作的能力。',
-    '我持审慎乐观态度——前景光明，但中间过程可能充满阵痛。需要政府、企业、教育机构三方协同。',
-  ],
-  e002: [
-    '作为一线从业者，我切身感受到 AI 正在创造大量全新岗位：提示工程师、AI 训练师、数据标注师、AI 产品经理……',
-    'AI 将人类从重复性、低创造性的工作中解放出来，让我们能专注于更高层次的创新。这是生产力的又一次飞跃。',
-    '我在字节跳动每天都看到 AI 工具如何让内容创作者效率翻倍。这不是取代，而是赋能。',
-    '短期来看会出现岗位调整，但长期而言，AI 带来的就业增量远大于减量。',
-  ],
-  e003: [
-    '结构性失业的风险是真实存在的，特别是在制造业和传统服务业领域。我们需要正视这个问题。',
-    '低技能岗位受到的冲击最大，而转岗培训需要时间和大量资源投入。市场调节无法解决所有问题。',
-    '我们需要完善社会保障体系，为转型期的劳动者提供足够的缓冲和支持。',
-    '从经济学角度看，AI 的收益分配可能加剧不平等——技术所有者与普通劳动者之间的差距会拉大。',
-  ],
-  e004: [
-    '各国政府需要加快 AI 治理框架的制定，确保技术发展的成果能够惠及所有人。',
-    '欧盟的 AI 法案是一个好的开端，中国也需要建立自己的 AI 监管框架，平衡创新与安全。',
-    '全球协同治理是关键——AI 不分国界，我们需要国际社会共同制定规则。',
-    '我担心的是算法偏见和数据隐私问题。如果监管跟不上，技术可能加剧社会不公。',
-  ],
-  e005: [
-    '人机协作是未来的主旋律。机器做机器擅长的事，人类做人类擅长的事——创造力、共情力、复杂决策。',
-    '在工业领域，我们已经看到协作机器人如何提升生产效率，同时保障工人安全。',
-    'AI 不是替代人类，而是扩展人类的能力边界。就像望远镜扩展了我们的视野一样。',
-    '真正的突破在于人机融合——不是谁替代谁，而是产生 1+1>2 的协同效应。',
-  ],
-  e006: [
-    '从更长的时间维度来看，AI 将催生全新的文明形态。就像工业革命改变了社会结构一样，AI 革命将彻底重塑人类社会的组织方式。',
-    '未来的工作岗位很可能我们现在完全无法想象。20年前谁能想到"网红"、"主播"会成为职业？',
-    '元宇宙 + AI 将创造全新的数字生存空间，人类的工作、学习、社交方式都将被重新定义。',
-    '我们需要超越"替代"的思维定式，去想象一种人机共生、共同进化的未来图景。',
-  ],
-  e007: [
-    '技术本身是中性的，影响取决于制度设计和社会选择。同样的技术在不同的社会制度下会产生截然不同的结果。',
-    '我们需要关注的是：谁在开发 AI？为谁的利益服务？谁参与决策？这些问题比技术本身更重要。',
-    'AI 治理需要多元利益相关方的参与——不仅仅是技术人员，还需要社会学家、伦理学家、法律专家和公众代表。',
-    '社会韧性建设比技术升级更紧迫——我们需要全社会达成共识，明确 AI 发展的红线与底线。',
-  ],
-  e008: [
-    '在我看来，AI 对齐问题比替代问题更紧迫。如何确保 AI 系统的目标与人类价值观一致，这是当前最重要的挑战。',
-    '大语言模型的安全边界仍然很脆弱。我们见过太多 jailbreak（越狱）攻击成功的案例。',
-    '红队测试和对抗性训练需要持续投入，安全研究不能因为商业压力而被削弱。',
-    '我呼吁业内同行将安全性作为核心指标，而不仅仅是追求模型性能的提升。',
-  ],
-  e009: [
-    '教育体系必须率先变革。我们还在用工业化时代的教育模式培养数字时代的学生，这本身就是个问题。',
-    'AI 辅助个性化学习是教育领域最具潜力的应用方向。每个学生都能拥有一个 AI 私教。',
-    '我在创业中看到，掌握 AI 工具的学生学习效率提升了 3 倍以上。这才是教育的未来。',
-    '教育的目标要从"知识传授"转向"培养批判性思维和终身学习能力"——这些是 AI 难以替代的。',
-  ],
-  e010: [
-    '我观察到公众对 AI 的认知存在两个极端：要么过度乐观，要么过度恐惧。媒体在这其中扮演了重要角色。',
-    '负责任的技术报道应该既展示 AI 的能力边界，也坦诚讨论风险，而不是制造恐慌或泡沫。',
-    '公众理解是技术良性发展的基础。我们现在最缺的不是技术，而是高质量的公众科普。',
-    '从报道中我注意到，很多关于 AI"取代人类"的担忧其实源于对技术的误解。科普工作任重道远。',
-  ],
-}
+const API_BASE = 'http://localhost:8080/api'
 
-// ─── 主持人 ──────────────────────────────────────────────
+/** 主持人（前端本地构造，后端不返回此对象） */
 const HOST = {
   id: 'host',
   name: '主持人',
@@ -482,7 +436,10 @@ const HOST = {
   is_host: true,
 }
 
-// ─── 响应式状态 ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// 响应式状态
+// ══════════════════════════════════════════════════════════════════════════
+
 const session = reactive({
   id: '',
   topic: '',
@@ -490,11 +447,13 @@ const session = reactive({
   status: 'pending',
   created_at: '',
   started: false,
+  loading: false,
+  error: '',
   experts: [],
   transcripts: [],
-  currentRound: 0,
   totalSpeeches: 0,
-  timer: null,
+  eventSource: null,
+  conclusion: null,
 })
 
 const currentSpeakerId = ref(null)
@@ -526,96 +485,125 @@ const statusVariant = computed(() => {
   return map[session.status] || 'pending'
 })
 
-const displayExperts = computed(() => {
-  // 从专家池选取前 expert_count 位
-  return EXPERT_POOL.slice(0, session.expert_count)
-})
-
-// ─── 页面加载后自动生成专家 ──────────────────────────────
-onMounted(() => {
-  // 生成 Mock 专家
-  session.experts = EXPERT_POOL.slice(0, session.expert_count).map(e => ({
-    ...e,
-    session_id: session.id || 'mock-session',
-  }))
-})
-
-// ─── 生成 UUID ───────────────────────────────────────────
-function genId() {
-  return 'xxxx-xxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16))
+// ─── 发言人信息查询 ──────────────────────────────────
+function getSpeakerInfo(speakerType, speakerId) {
+  if (speakerType === 'host') return HOST
+  return session.experts.find(e => e.id === speakerId) || null
 }
 
-// ─── 开始讨论 ─────────────────────────────────────────────
-function startDiscussion() {
-  if (!session.topic.trim()) {
-    session.topic = '人工智能是否会取代人类工作'
+function getSpeakerColor(speakerType, speakerId) {
+  const info = getSpeakerInfo(speakerType, speakerId)
+  return info ? info.color : '#6366f1'
+}
+
+function getSpeakerTitle(speakerType, speakerId) {
+  const info = getSpeakerInfo(speakerType, speakerId)
+  return info ? info.title : ''
+}
+
+// ─── 开始讨论 — POST /api/sessions ─────────────────────
+async function startDiscussion() {
+  if (!session.topic.trim()) return
+
+  session.loading = true
+  session.error = ''
+
+  try {
+    const resp = await fetch(API_BASE + '/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        topic: session.topic,
+        expert_count: session.expert_count,
+      }),
+    })
+
+    if (!resp.ok) {
+      const err = await resp.json()
+      throw new Error(err.error?.message || '创建会话失败')
+    }
+
+    const data = await resp.json()
+
+    session.id = data.id
+    session.status = data.status
+    session.created_at = data.created_at
+    session.experts = data.experts || []
+    session.transcripts = []
+    session.totalSpeeches = 0
+    session.started = true
+    session.loading = false
+
+    nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
+
+    connectSSE(data.id)
+    fetchTranscripts(data.id)
+
+  } catch (err) {
+    session.loading = false
+    session.error = err.message
+  }
+}
+
+// ─── SSE 事件流 — EventSource ──────────────────────────
+let sseRetryCount = 0
+
+function connectSSE(sessionId) {
+  if (session.eventSource) {
+    session.eventSource.close()
   }
 
-  session.id = 'session-' + genId()
-  session.created_at = new Date().toISOString()
-  session.status = 'generating'
-  session.started = true
-  session.currentRound = 0
-  session.totalSpeeches = 0
-  session.transcripts = []
-  session.experts = EXPERT_POOL.slice(0, session.expert_count).map(e => ({
-    ...e,
-    session_id: session.id,
-  }))
+  sseRetryCount = 0
+  const es = new EventSource(API_BASE + '/sessions/' + sessionId + '/events')
+  session.eventSource = es
 
-  // 自动滚动到演播厅模式顶部
-  nextTick(() => {
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+  es.addEventListener('session.status', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      session.status = data.status
+    } catch (err) {
+      console.error('SSE parse session.status error:', err)
+    }
   })
 
-  // 模拟专家生成完成
-  setTimeout(() => {
-    session.status = 'discussing'
-    // 主持人开场白
-    appendSpeech('host', null, MOCK_SPEECHES.host[0].replace('{topic}', session.topic))
-  }, 800)
+  es.addEventListener('transcript.new', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      addTranscriptFromSSE(data)
+    } catch (err) {
+      console.error('SSE parse transcript.new error:', err)
+    }
+  })
 
-  // 启动模拟发言定时器
-  startSimulation()
-}
+  es.addEventListener('heartbeat', () => {
+    // 保活信号，无需处理
+  })
 
-// ─── 模拟发言 ────────────────────────────────────────────
-function getRandomItem(arr) {
-  return arr[Math.floor(Math.random() * arr.length)]
-}
-
-function appendSpeech(speakerType, speakerId, content) {
-  const isHost = speakerType === 'host'
-  let speaker
-
-  if (isHost) {
-    speaker = HOST
-  } else {
-    speaker = session.experts.find(e => e.id === speakerId)
-    if (!speaker) speaker = getRandomItem(session.experts)
+  es.onerror = () => {
+    sseRetryCount++
+    if (sseRetryCount > 5) {
+      session.error = '与服务器的实时连接已断开，请刷新页面重试'
+    }
   }
 
-  const transcript = {
-    id: 't' + genId(),
-    session_id: session.id,
-    speaker_type: speakerType,
-    speaker_id: isHost ? null : speaker.id,
-    speaker_name: speaker.name,
-    avatar_emoji: speaker.avatar_emoji,
-    content,
-    sequence: session.transcripts.length + 1,
-    created_at: new Date().toISOString(),
-    speakerColor: speaker.color,
-    speakerTitle: speaker.title,
+  es.onopen = () => {
+    sseRetryCount = 0
+  }
+}
+
+// ─── 处理 SSE 新发言 ──────────────────────────────────
+function addTranscriptFromSSE(data) {
+  const t = {
+    ...data,
+    speakerColor: getSpeakerColor(data.speaker_type, data.speaker_id),
+    speakerTitle: getSpeakerTitle(data.speaker_type, data.speaker_id),
   }
 
-  session.transcripts.push(transcript)
+  session.transcripts.push(t)
   session.totalSpeeches++
 
-  // 高亮当前发言人
-  currentSpeakerId.value = speaker.id
+  currentSpeakerId.value = data.speaker_type === 'host' ? 'host' : data.speaker_id
 
-  // 自动滚动到底部
   if (isAutoScroll.value) {
     nextTick(() => {
       const el = speechAreaRef.value
@@ -626,91 +614,80 @@ function appendSpeech(speakerType, speakerId, content) {
   }
 }
 
-function getNextDelay() {
-  return 2000 + Math.random() * 1500
-}
+// ─── 获取历史发言 — GET /api/sessions/{id}/transcript ──
+async function fetchTranscripts(sessionId, after) {
+  try {
+    let url = API_BASE + '/sessions/' + sessionId + '/transcript'
+    if (after != null) url += '?after=' + after
+    const resp = await fetch(url)
+    if (!resp.ok) return
 
-function getMockSpeaker() {
-  // 70% 概率是专家发言，30% 概率是主持人串场
-  const isHost = Math.random() < 0.25
-  if (isHost) {
-    return { type: 'host', id: null, pool: 'host' }
-  }
-  const expert = getRandomItem(session.experts)
-  return { type: 'expert', id: expert.id, pool: expert.id }
-}
+    const data = await resp.json()
+    const mapped = (data.transcripts || []).map(t => ({
+      ...t,
+      speakerColor: getSpeakerColor(t.speaker_type, t.speaker_id),
+      speakerTitle: getSpeakerTitle(t.speaker_type, t.speaker_id),
+    }))
 
-function getMockContent(type, poolKey) {
-  const pool = MOCK_SPEECHES[poolKey]
-  if (!pool || pool.length === 0) return '这是一个有趣的视角。'
-
-  // 避免完全重复同一专家的最近一条发言
-  const lastBySpeaker = session.transcripts
-    .filter(t => t.speaker_type === type && t.speaker_id === (type === 'host' ? null : poolKey))
-  const usedIndices = new Set()
-  if (lastBySpeaker.length > 0) {
-    const lastContent = lastBySpeaker[lastBySpeaker.length - 1].content
-    const lastIdx = pool.indexOf(lastContent)
-    if (lastIdx >= 0) usedIndices.add(lastIdx)
-  }
-
-  const available = pool.filter((_, i) => !usedIndices.has(i))
-  const source = available.length > 0 ? available : pool
-  return getRandomItem(source)
-}
-
-function startSimulation() {
-  if (session.timer) clearTimeout(session.timer)
-
-  function tick() {
-    if (session.status !== 'discussing') return
-
-    const speaker = getMockSpeaker()
-    const content = getMockContent(speaker.type, speaker.pool)
-    appendSpeech(speaker.type, speaker.id, content)
-
-    // 检查是否讨论结束（模拟 15-20 条发言后结束）
-    if (session.transcripts.length >= 18) {
-      setTimeout(() => {
-        endDiscussion()
-      }, 2000)
-      return
+    if (after == null) {
+      session.transcripts = mapped
+    } else {
+      mapped.forEach(t => {
+        if (!session.transcripts.find(et => et.id === t.id)) {
+          session.transcripts.push(t)
+        }
+      })
     }
+    session.totalSpeeches = session.transcripts.length
 
-    session.timer = setTimeout(tick, getNextDelay())
+    if (data.has_more && data.next_cursor) {
+      fetchTranscripts(sessionId, data.next_cursor)
+    }
+  } catch (err) {
+    console.error('Fetch transcripts error:', err)
   }
-
-  session.timer = setTimeout(tick, getNextDelay())
 }
 
-// ─── 结束讨论 ────────────────────────────────────────────
-function endDiscussion() {
-  session.status = 'concluded'
-  currentSpeakerId.value = null
-  if (session.timer) {
-    clearTimeout(session.timer)
-    session.timer = null
+// ─── 生成结论 — POST /api/sessions/{id}/conclusion ─────
+async function generateConclusion() {
+  if (!session.id || session.conclusion) return
+
+  try {
+    const resp = await fetch(API_BASE + '/sessions/' + session.id + '/conclusion', {
+      method: 'POST',
+    })
+    if (resp.ok) {
+      session.conclusion = await resp.json()
+    }
+  } catch (err) {
+    console.error('Generate conclusion error:', err)
   }
-  // 主持人总结
-  appendSpeech('host', null, '感谢各位专家的精彩讨论！今天的圆桌交流让我们看到了 AI 时代的多元视角。期待下次再会！')
 }
+
+// ─── 监听状态变更，自动生成结论 ──────────────────────────
+watch(() => session.status, (newStatus) => {
+  if (newStatus === 'concluded') {
+    generateConclusion()
+  }
+})
 
 // ─── 重置 ────────────────────────────────────────────────
 function resetSession() {
-  if (session.timer) {
-    clearTimeout(session.timer)
-    session.timer = null
+  if (session.eventSource) {
+    session.eventSource.close()
+    session.eventSource = null
   }
   session.id = ''
   session.status = 'pending'
   session.started = false
-  session.experts = EXPERT_POOL.slice(0, session.expert_count)
+  session.loading = false
+  session.error = ''
+  session.experts = []
   session.transcripts = []
-  session.currentRound = 0
   session.totalSpeeches = 0
+  session.conclusion = null
   currentSpeakerId.value = null
 }
-
 // ─── 滚动控制 ────────────────────────────────────────────
 function handleScroll() {
   const el = speechAreaRef.value
@@ -740,8 +717,8 @@ function formatTime(isoString) {
 
 // ─── 清理 ────────────────────────────────────────────────
 onUnmounted(() => {
-  if (session.timer) {
-    clearTimeout(session.timer)
+  if (session.eventSource) {
+    session.eventSource.close()
   }
 })
 
@@ -1930,6 +1907,84 @@ function getActivityPercent(speakerId) {
 @keyframes avatarGlow {
   0%, 100% { box-shadow: 0 0 10px currentColor; }
   50% { box-shadow: 0 0 20px currentColor; }
+}
+
+/* ─── 错误提示 ─────────────────────────────────────────────────────────── */
+.studio-error {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin: 0 1rem;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius-md);
+  color: #fca5a5;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.studio-error button {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #fca5a5;
+  cursor: pointer;
+  font-size: 1.1rem;
+  opacity: 0.7;
+}
+.studio-error button:hover {
+  opacity: 1;
+}
+
+/* ─── 结论展示 ─────────────────────────────────────────────────────────── */
+.conclusion-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.conclusion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.conclusion-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+.conclusion-text {
+  flex: 1;
+  color: var(--text-primary);
+}
+.conclusion-tag {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.tag-strong, .tag-high { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
+.tag-moderate, .tag-medium { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+.tag-weak, .tag-low { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; }
+
+.btn-conclusion {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all var(--transition-fast);
+}
+.btn-conclusion:hover {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
 }
 
 /* ─── 发言活跃度 ────────────────────────────────────────────────────────── */

@@ -134,11 +134,22 @@ def sse_events(session_id):
             'error': {'code': 'SESSION_NOT_FOUND', 'message': '讨论会话不存在'}
         }), 404
 
-    # ── 创建 SSE 事件流生成器 ────────────────────────────
+    # ── 立即更新数据库状态为 discussing ────────────────────
+    # 在生成器执行前更新，避免结论 API 调用时的 INVALID_STATUS 错误
+    if session.status == 'generating':
+        Session.update_status(session_id, 'discussing')
+        session = Session.get(session_id)  # 重新获取最新状态
+
+    # ── 获取专家列表 ──────────────────────────────────────
+    experts = Expert.list_by_session(session_id)
+
+    # ── 创建 SSE 事件流生成器（含讨论引擎）────────────────
     generator = event_generator(
         session_id=session_id,
         current_status=session.status,
         previous_status='pending',
+        topic=session.topic,
+        experts=experts,
     )
 
     return Response(
