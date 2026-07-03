@@ -131,6 +131,9 @@ def build_speeches_for_topic(topic, experts):
     """
     根据话题和专家列表构建完整发言序列。
 
+    优先调用 DeepSeek API 生成动态发言，
+    API 不可用时回退到预设发言池。
+
     参数:
         topic (str): 讨论话题
         experts (list[dict]): 专家列表（包含 id, name, stance, avatar_emoji, color 等）
@@ -139,6 +142,118 @@ def build_speeches_for_topic(topic, experts):
         list[dict]: 发言序列，每个元素包含 speaker_id, speaker_type,
                     speaker_name, avatar_emoji, content
     """
+    if not experts:
+        return []
+
+    # ── 1. 尝试 DeepSeek API ────────────────────────────
+    api_result = _api_generate_speeches(topic, experts)
+    if api_result is not None:
+        return api_result
+
+    # ── 2. API 不可用，回退到预设发言池 ──────────────────
+    return _fallback_speeches(topic, experts)
+
+
+def _api_generate_speeches(topic, experts):
+    """调用 DeepSeek API 生成讨论发言。
+
+    返回:
+        list[dict] | None: 发言序列，API 失败或结果不足时返回 None
+    """
+    from app.services.deepseek_client import call_deepseek_json
+
+    # 构建专家描述（附带索引，供 API 引用）
+    expert_lines = []
+    for i, expert in enumerate(experts):
+        expert_lines.append(
+            f'[{i}] {expert["name"]}（{expert.get("title", "")}）'
+            f'—— 立场：{expert.get("stance", "")}'
+        )
+    experts_desc = '\n'.join(expert_lines)
+
+    system_prompt = (
+        '你是一位圆桌讨论主持人。请根据话题和专家阵容，'
+        '生成一场3轮的小型圆桌讨论发言。'
+        '要求：每轮所有专家都发言一次，主持人负责开场、串场、收尾。'
+        '发言内容要贴合每位专家的立场，语言自然口语化。'
+        '总发言数必须达到 16-20 条，不要少于 16 条。'
+    )
+
+    user_prompt = (
+        f'## 讨论话题\n{topic}\n\n'
+        f'## 专家阵容\n{experts_desc}\n\n'
+        '## 要求\n'
+        '生成3轮讨论，每轮每位专家发言一次：\n'
+        '第1轮：主持人开场（1条）→ 每位专家依次发言（{n}条）\n'
+        '第2轮：主持人引导（1条）→ 每位专家依次发言（{n}条）\n'
+        '第3轮：主持人收尾引导（1条）→ 每位专家一句话总结（{n}条）→ 主持人结语（1条）\n'
+        f'总计：{len(experts) * 3 + 4} 条发言\n\n'
+        '## 输出格式（JSON数组）\n'
+        '[\n'
+        '  {"speaker_type": "host", "speaker_index": -1, "content": "..."},\n'
+        '  {"speaker_type": "expert", "speaker_index": 0, "content": "..."},\n'
+        '  {"speaker_type": "expert", "speaker_index": 1, "content": "..."},\n'
+        '  ...\n'
+        ']\n'
+        'speaker_index: 主持人填 -1，专家填对应的数组索引（0, 1, 2, ...）。'
+    )
+
+    # 替换占位符
+    user_prompt = user_prompt.replace('{n}', str(len(experts)))
+
+    print(f'[DEBUG] _api_generate_speeches: topic="{topic}", experts={len(experts)}')
+    result = call_deepseek_json(
+        messages=[{'role': 'user', 'content': user_prompt}],
+        system_message=system_prompt,
+        temperature=0.8,
+        max_tokens=8192,
+    )
+
+    if not isinstance(result, list):
+        print(f'[DEBUG] API result is not a list: {type(result)}')
+        return None
+
+    print(f'[DEBUG] API returned {len(result)} items')
+
+    # 将 API 返回映射到标准格式（使用 speaker_index 而非 UUID）
+    speeches = []
+    for item in result:
+        stype = item.get('speaker_type', 'expert')
+        idx = item.get('speaker_index', -1)
+        content = item.get('content', '')
+
+        if stype == 'host' or idx < 0:
+            speeches.append({
+                'speaker_id': None,
+                'speaker_type': 'host',
+                'speaker_name': '主持人',
+                'avatar_emoji': '🎙️',
+                'content': content,
+            })
+        elif 0 <= idx < len(experts):
+            expert = experts[idx]
+            speeches.append({
+                'speaker_id': expert['id'],
+                'speaker_type': 'expert',
+                'speaker_name': expert['name'],
+                'avatar_emoji': expert.get('avatar_emoji', '🧑‍💼'),
+                'content': content,
+            })
+        else:
+            print(f'[DEBUG] Skipping item with invalid index: speaker_index={idx}')
+
+    # 如果结果太少，说明解析可能有问题，让调用方降级到 fallback
+    min_expected = max(5, len(experts) * 2)
+    if len(speeches) < min_expected:
+        print(f'[DEBUG] Speeches too few ({len(speeches)} < {min_expected}), falling back')
+        return None
+
+    print(f'[DEBUG] Returning {len(speeches)} speeches')
+    return speeches
+
+
+def _fallback_speeches(topic, experts):
+    """当 API 不可用时，使用预设发言池构建讨论。"""
     speeches = []
     n = len(experts)
 
@@ -154,31 +269,23 @@ def build_speeches_for_topic(topic, experts):
             pool.extend(SPEECH_POOL.get(tag, []))
         if not pool:
             pool = SPEECH_POOL['positive']
-        # 随机打乱并取 3 条
         random.shuffle(pool)
         selected = pool[:3]
-        # 确保至少 3 条
         while len(selected) < 3:
             selected.append(random.choice(SPEECH_POOL['positive']))
-        # 格式化话题占位符
         expert_speeches[expert['id']] = [
             s.format(topic=topic) for s in selected
         ]
 
-    # ─── 构建发言序列（3 轮） ────────────────────────────
-
     # 第 1 轮：主持人开场 → 每位专家发言
     speeches.append({
-        'speaker_id': None,
-        'speaker_type': 'host',
-        'speaker_name': '主持人',
-        'avatar_emoji': '🎙️',
+        'speaker_id': None, 'speaker_type': 'host',
+        'speaker_name': '主持人', 'avatar_emoji': '🎙️',
         'content': random.choice(HOST_OPENINGS).format(topic=topic),
     })
     for expert in experts:
         speeches.append({
-            'speaker_id': expert['id'],
-            'speaker_type': 'expert',
+            'speaker_id': expert['id'], 'speaker_type': 'expert',
             'speaker_name': expert['name'],
             'avatar_emoji': expert['avatar_emoji'],
             'content': expert_speeches[expert['id']][0],
@@ -186,17 +293,14 @@ def build_speeches_for_topic(topic, experts):
 
     # 第 2 轮：主持人串场 → 每位专家发言
     speeches.append({
-        'speaker_id': None,
-        'speaker_type': 'host',
-        'speaker_name': '主持人',
-        'avatar_emoji': '🎙️',
-        'content': random.choice(ROUND_SUMMARIES).format(topic=topic) + ' ' +
-                   random.choice(HOST_INTERJECTIONS).format(topic=topic),
+        'speaker_id': None, 'speaker_type': 'host',
+        'speaker_name': '主持人', 'avatar_emoji': '🎙️',
+        'content': (random.choice(ROUND_SUMMARIES).format(topic=topic) + ' ' +
+                    random.choice(HOST_INTERJECTIONS).format(topic=topic)),
     })
     for expert in experts:
         speeches.append({
-            'speaker_id': expert['id'],
-            'speaker_type': 'expert',
+            'speaker_id': expert['id'], 'speaker_type': 'expert',
             'speaker_name': expert['name'],
             'avatar_emoji': expert['avatar_emoji'],
             'content': expert_speeches[expert['id']][1],
@@ -204,16 +308,13 @@ def build_speeches_for_topic(topic, experts):
 
     # 第 3 轮：主持人提醒收尾 → 每位专家一句话总结
     speeches.append({
-        'speaker_id': None,
-        'speaker_type': 'host',
-        'speaker_name': '主持人',
-        'avatar_emoji': '🎙️',
+        'speaker_id': None, 'speaker_type': 'host',
+        'speaker_name': '主持人', 'avatar_emoji': '🎙️',
         'content': '时间关系，我们进行最后一个环节。请每位专家用一句话总结您的核心观点。',
     })
     for expert in experts:
         speeches.append({
-            'speaker_id': expert['id'],
-            'speaker_type': 'expert',
+            'speaker_id': expert['id'], 'speaker_type': 'expert',
             'speaker_name': expert['name'],
             'avatar_emoji': expert['avatar_emoji'],
             'content': expert_speeches[expert['id']][2],
@@ -221,10 +322,8 @@ def build_speeches_for_topic(topic, experts):
 
     # 主持人总结
     speeches.append({
-        'speaker_id': None,
-        'speaker_type': 'host',
-        'speaker_name': '主持人',
-        'avatar_emoji': '🎙️',
+        'speaker_id': None, 'speaker_type': 'host',
+        'speaker_name': '主持人', 'avatar_emoji': '🎙️',
         'content': random.choice(HOST_CLOSING).format(topic=topic),
     })
 
