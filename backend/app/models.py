@@ -320,3 +320,145 @@ class Consensus:
     """共识模型，对应 consensus 表。"""
 
     TABLE = 'consensus'
+
+    def __init__(self, row):
+        self.id = row['id']
+        self.session_id = row['session_id']
+        self.summary = row['summary']
+        self.sort_order = row['sort_order']
+        self.created_at = row['created_at']
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'summary': self.summary,
+            'sort_order': self.sort_order,
+            'created_at': self.created_at,
+        }
+
+    # ── CRUD ──────────────────────────────────────────
+
+    @staticmethod
+    def bulk_create(session_id, consensus_list):
+        """批量创建共识记录。
+        consensus_list: [{'summary': str, 'degree': str, 'order_index': int}]
+        """
+        conn = _get_db()
+        try:
+            cids = []
+            for item in consensus_list:
+                cid = _gen_id()
+                now = _now()
+                conn.execute(
+                    'INSERT INTO consensus (id, session_id, summary, sort_order, created_at) '
+                    'VALUES (?, ?, ?, ?, ?)',
+                    (cid, session_id, item['summary'], item['order_index'], now),
+                )
+                cids.append(cid)
+            conn.commit()
+            return Consensus.list_by_session(session_id)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def list_by_session(session_id):
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                'SELECT * FROM consensus WHERE session_id = ? ORDER BY sort_order',
+                (session_id,),
+            ).fetchall()
+            return [Consensus(r).to_dict() for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def delete_by_session(session_id):
+        conn = _get_db()
+        try:
+            conn.execute('DELETE FROM consensus WHERE session_id = ?', (session_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Divergence — 分歧
+# ══════════════════════════════════════════════════════════════════════════
+class Divergence:
+    """分歧模型，对应 divergences 表。"""
+
+    TABLE = 'divergences'
+
+    def __init__(self, row):
+        self.id = row['id']
+        self.session_id = row['session_id']
+        self.description = row['description']
+        self.involved_experts = row['involved_experts']  # JSON 字符串
+        self.side_a_expert = row['side_a_expert']
+        self.side_b_expert = row['side_b_expert']
+        self.sort_order = row['sort_order']
+        self.created_at = row['created_at']
+
+    def to_dict(self):
+        import json
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'description': self.description,
+            'involved_experts': json.loads(self.involved_experts) if self.involved_experts else [],
+            'sort_order': self.sort_order,
+            'created_at': self.created_at,
+        }
+
+    # ── CRUD ──────────────────────────────────────────
+
+    @staticmethod
+    def bulk_create(session_id, divergences_list):
+        """批量创建分歧记录。
+        divergences_list: [{'description': str, 'severity': str,
+                           'involved_expert_ids': list, 'order_index': int}]
+        """
+        conn = _get_db()
+        try:
+            dids = []
+            for item in divergences_list:
+                did = _gen_id()
+                now = _now()
+                involved = json.dumps(
+                    item.get('involved_expert_ids', []),
+                    ensure_ascii=False,
+                )
+                conn.execute(
+                    'INSERT INTO divergences (id, session_id, description, involved_experts, '
+                    'sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                    (did, session_id, item['description'], involved,
+                     item['order_index'], now),
+                )
+                dids.append(did)
+            conn.commit()
+            return Divergence.list_by_session(session_id)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def list_by_session(session_id):
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                'SELECT * FROM divergences WHERE session_id = ? ORDER BY sort_order',
+                (session_id,),
+            ).fetchall()
+            return [Divergence(r).to_dict() for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def delete_by_session(session_id):
+        conn = _get_db()
+        try:
+            conn.execute('DELETE FROM divergences WHERE session_id = ?', (session_id,))
+            conn.commit()
+        finally:
+            conn.close()
